@@ -8,7 +8,8 @@ on:
       - docker/**
       - .github/workflows/publish.yml
   pull_request:
-  # Weekly rebuild picks up security fixes in the php:8.3-apache base image.
+  # Weekly check for security fixes in the PHP base image. It only rebuilds
+  # when the base image has changed since the last published build.
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
@@ -30,11 +31,31 @@ jobs:
           test -n "$version"
           echo "osticket=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Check whether the PHP base image changed
+        id: base
+        env:
+          VERSION: ${{ steps.version.outputs.osticket }}
+        run: |
+          base=$(sed -n 's/^FROM //p' Dockerfile | head -1)
+          digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            published=$(docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY_OWNER}/osticket:${VERSION}" \
+              --format '{{json .Image}}' 2>/dev/null \
+              | jq -r '."linux/amd64".config.Labels["org.opencontainers.image.base.digest"] // empty' || true)
+            if [ "$published" = "$digest" ]; then
+              echo "::notice::$base is unchanged since the last build, nothing to do"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - uses: docker/setup-qemu-action@v4
+        if: steps.base.outputs.skip != 'true'
       - uses: docker/setup-buildx-action@v4
+        if: steps.base.outputs.skip != 'true'
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
+        if: steps.base.outputs.skip != 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -42,6 +63,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Image metadata
+        if: steps.base.outputs.skip != 'true'
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -52,8 +74,10 @@ jobs:
           labels: |
             org.opencontainers.image.title=osTicket
             org.opencontainers.image.version=${{ steps.version.outputs.osticket }}
+            org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
 
       - uses: docker/build-push-action@v7
+        if: steps.base.outputs.skip != 'true'
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -64,7 +88,8 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Create the GitHub release for this version
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        id: release
+        if: steps.base.outputs.skip != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.osticket }}
@@ -78,3 +103,15 @@ jobs:
           \`\`\`
 
           See the README for configuration."
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      # A new osTicket version needs the image tag in Easypanel's template
+      # bumped. Needs a classic personal access token with the public_repo
+      # scope saved as the TEMPLATES_PR_TOKEN secret; skipped without it.
+      - name: Open the Easypanel template PR
+        if: steps.release.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TEMPLATES_PR_TOKEN }}
+          VERSION: ${{ steps.version.outputs.osticket }}
+          OWNER: ${{ github.repository_owner }}
+        run: .github/scripts/open-easypanel-pr.sh
