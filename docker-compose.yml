@@ -1,0 +1,49 @@
+# Local test setup. Change every password before using this anywhere real.
+services:
+  osticket:
+    image: ghcr.io/dtsoden/osticket:1.18.4
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      DB_HOST: db
+      DB_NAME: osticket
+      DB_USER: osticket
+      DB_PASS: change-me-db
+      INSTALL_NAME: My Helpdesk
+      INSTALL_EMAIL: support@example.com
+      INSTALL_URL: http://localhost:8080
+      INSTALL_SECRET: change-me-to-a-long-random-string
+      ADMIN_FIRSTNAME: Jane
+      ADMIN_LASTNAME: Doe
+      ADMIN_EMAIL: jane@example.com
+      ADMIN_USER: ostadmin
+      ADMIN_PASS: change-me-admin
+      TIMEZONE: UTC
+      CRON_INTERVAL: 5
+      # SMTP_HOST: smtp.example.com
+      # SMTP_PORT: 587
+      # SMTP_SECURITY: starttls
+      # SMTP_USER: user
+      # SMTP_PASS: secret
+      # SMTP_FROM: support@example.com
+    volumes:
+      - osticket-data:/data
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: osticket
+      MARIADB_USER: osticket
+      MARIADB_PASSWORD: change-me-db
+      MARIADB_ROOT_PASSWORD: change-me-root
+    volumes:
+      - db-data:/var/lib/mysql
+    restart: unless-stopped
+
+volumes:
+  osticket-data:
+  db-data:
