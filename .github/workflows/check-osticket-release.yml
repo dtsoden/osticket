@@ -1,0 +1,53 @@
+name: Check for new osTicket release
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare with the newest osTicket release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(sed -n 's/^ARG OSTICKET_VERSION=//p' Dockerfile)
+          latest=$(gh api --paginate repos/osTicket/osTicket/releases \
+            --jq '.[] | select(.prerelease | not) | select(.draft | not) | .tag_name' \
+            | sed 's/^v//' | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)
+          echo "Dockerfile has $current, newest osTicket release is $latest"
+          newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)
+          if [ -n "$latest" ] && [ "$newest" != "$current" ]; then
+            echo "new=$latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update the Dockerfile and compose file
+        if: steps.check.outputs.new
+        env:
+          NEW: ${{ steps.check.outputs.new }}
+        run: |
+          # Only bump once the release zip the Dockerfile downloads is really there.
+          curl -fsSIL -o /dev/null "https://github.com/osTicket/osTicket/releases/download/v${NEW}/osTicket-v${NEW}.zip"
+          sed -i "s/^ARG OSTICKET_VERSION=.*/ARG OSTICKET_VERSION=${NEW}/" Dockerfile
+          sed -i "s|\(ghcr.io/[^/]*/osticket:\)[0-9.]*|\1${NEW}|" docker-compose.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Update osTicket to ${NEW}"
+          git push
+
+      # Pushes made with GITHUB_TOKEN don't start other workflows, so start the
+      # build explicitly.
+      - name: Build and publish the new version
+        if: steps.check.outputs.new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --ref main
